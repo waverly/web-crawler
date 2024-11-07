@@ -22,7 +22,7 @@ all: venv
 venv:
 	test -d ${VENV_NAME} || python3 -m venv ${VENV_NAME}
 	${PIP} install --upgrade pip
-	${PIP} install requests beautifulsoup4 pytest black fastapi uvicorn python-dotenv google-generativeai pyperclip
+	${PIP} install requests beautifulsoup4 pytest black fastapi uvicorn python-dotenv google-generativeai pyperclip pytest pytest-mock
 
 
 # Show activation command

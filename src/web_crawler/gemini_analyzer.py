@@ -33,57 +33,25 @@ def analyze_page_content(
     links: List[Dict], high_priority_keywords: List[str], medium_priority_keywords: List[str], test_mode: bool = False
 ) -> List[Dict]:
     """Analyze links in batches to avoid rate limits."""
-
     model = init_gemini()
 
-    if test_mode:
-        logger.info(f"🧪 Test mode: limiting from {len(links)} to {config.TEST_MAX_LINKS} links")
-        links = links[: config.TEST_MAX_LINKS]
-
-    BATCH_SIZE = 5
+    links = _prepare_links(links, test_mode)
+    batch_size = _get_batch_size(test_mode)
     results = []
 
-    total_batches = (len(links) + BATCH_SIZE - 1) // BATCH_SIZE
+    total_batches = (len(links) + batch_size - 1) // batch_size
     logger.info(f"Will process {len(links)} links in {total_batches} batches")
 
-    for i in range(0, len(links), BATCH_SIZE):
-        batch_num = (i // BATCH_SIZE) + 1
+    for i in range(0, len(links), batch_size):
+        batch_num = (i // batch_size) + 1
         logger.info(f"📊 Processing batch {batch_num} of {total_batches}")
 
-        batch = links[i : i + BATCH_SIZE]
-        try:
-            prompt = _create_prompt(batch, high_priority_keywords, medium_priority_keywords)
-            rate_limiter.wait()
-            response = model.generate_content(prompt)
-
-            if not response or not response.text:
-                logger.warning(f"Empty response for batch {batch_num}")
-                continue
-
-            try:
-                parsed = extract_json(response.text)
-                if parsed and isinstance(parsed, dict) and "links" in parsed:
-                    batch_results = parsed["links"]
-                    if isinstance(batch_results, list):
-                        # Add debug logging
-                        logger.info(
-                            f"Gemini response for first link: {batch_results[0] if batch_results else 'No results'}"
-                        )
-
-                        # Preserve original context for each link
-                        for i, result in enumerate(batch_results):
-                            result["context"] = batch[i].get("context", "")
-                        results.extend(batch_results)
-                        logger.info(f"✅ Added {len(batch_results)} links from batch {batch_num}")
-                else:
-                    logger.warning(f"Invalid response structure in batch {batch_num}")
-            except Exception as e:
-                logger.error(f"Error processing batch {batch_num}: {str(e)}")
-                continue
-
-        except Exception as e:
-            logger.error(f"Error in batch {batch_num}: {str(e)}")
-            continue
+        batch = links[i : i + batch_size]
+        batch_results = _process_batch(batch_num, batch, model, high_priority_keywords, medium_priority_keywords)
+        if batch_results:
+            results.extend(batch_results)
+        else:
+            logger.warning(f"No valid results found in batch {batch_num}")
 
     if not results:
         logger.warning("No valid results found in any batch")
@@ -91,6 +59,72 @@ def analyze_page_content(
 
     logger.info(f"Successfully processed {len(results)} total links")
     return results
+
+
+def _prepare_links(links: List[Dict], test_mode: bool) -> List[Dict]:
+    """Prepare links based on test mode and configuration."""
+    if test_mode:
+        logger.info(f"🧪 Test mode: limiting from {len(links)} to {config.TEST_MAX_LINKS} links")
+        return links[: config.TEST_MAX_LINKS]
+    else:
+        return links[: config.MAX_LINKS_PER_PAGE]
+
+
+def _get_batch_size(test_mode: bool) -> int:
+    """Get batch size based on test mode and configuration."""
+    return config.TEST_BATCH_SIZE if test_mode else config.GEMINI_BATCH_SIZE
+
+
+def _process_batch(
+    batch_num: int, batch: List[Dict], model, high_priority_keywords: List[str], medium_priority_keywords: List[str]
+) -> List[Dict]:
+    """Process a single batch of links."""
+    prompt = _create_prompt(batch, high_priority_keywords, medium_priority_keywords)
+    try:
+        rate_limiter.wait()
+        response = model.generate_content(prompt)
+    except Exception as e:
+        logger.error(f"Error generating content for batch {batch_num}: {str(e)}")
+        return []
+
+    if not response or not response.text:
+        logger.warning(f"Empty response for batch {batch_num}")
+        return []
+
+    try:
+        parsed = extract_json(response.text)
+    except Exception as e:
+        logger.error(f"Error parsing JSON for batch {batch_num}: {str(e)}")
+        return []
+
+    batch_results = _validate_and_extract_results(parsed, batch_num)
+    if not batch_results:
+        return []
+
+    # Preserve original context for each link - dont want to risk llm modifying og context
+    for idx, result in enumerate(batch_results):
+        result["context"] = batch[idx].get("context", "")
+    logger.info(f"✅ Added {len(batch_results)} links from batch {batch_num}")
+    return batch_results
+
+
+def _validate_and_extract_results(parsed: Dict, batch_num: int) -> List[Dict]:
+    """Validate parsed JSON and extract results."""
+    if not parsed or not isinstance(parsed, dict) or "links" not in parsed:
+        logger.warning(f"Invalid response structure in batch {batch_num}")
+        return []
+
+    batch_results = parsed["links"]
+    if not isinstance(batch_results, list):
+        logger.warning(f"Invalid 'links' data in batch {batch_num}")
+        return []
+
+    if not batch_results:
+        logger.warning(f"No links found in batch {batch_num}")
+        return []
+
+    logger.info(f"Gemini response for first link: {batch_results[0] if batch_results else 'No results'}")
+    return batch_results
 
 
 def _create_prompt(
@@ -102,7 +136,7 @@ def _create_prompt(
         link_text = link.get("link_text", "")[:100].replace('"', '\\"')
         context = link.get("context", "")[:200].replace('"', '\\"')
         display_title = title if title else link_text
-        links_text += f"""Link {idx+1}: URL={link['url']} Title="{display_title}" Context="{context}"\n"""
+        links_text += f"""Link {idx + 1}: URL={link['url']} Title="{display_title}" Context="{context}"\n"""
 
     return f"""You are an analyst identifying high-priority links from a webpage to assist in finding relevant government financial information.
                 Output only JSON. Analyze these links for government financial information:

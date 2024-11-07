@@ -5,6 +5,7 @@ Crawls pages and extracts relevant links based on content analysis.
 
 from typing import Dict, List, Optional, Set
 import logging
+from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 from .database import Database
@@ -61,28 +62,19 @@ class Crawler:
         """Fetch a page from the web with retries and error handling."""
         logger.debug(f"Attempting to fetch URL: {url}")
 
-        normalized_url = normalize_url(url)
-        if not normalized_url:
-            logger.error(f"Normalization failed for URL: {url}")
-            return None
-
-        if normalized_url in self.visited_urls:
-            logger.debug(f"URL already visited: {normalized_url}")
-            return None
-
         try:
-            response = self.session.get(normalized_url, timeout=20, allow_redirects=True)
+            response = self.session.get(url, timeout=20, allow_redirects=True)
             content_type = response.headers.get("content-type", "").lower()
 
             if not content_type.startswith("text/html"):
-                logger.warning(f"Skipping non-HTML content: {content_type} at {normalized_url}")
+                logger.warning(f"Skipping non-HTML content: {content_type} at {url}")
                 return None
 
-            logger.info(f"Successfully fetched page: {normalized_url}")
+            logger.info(f"Successfully fetched page: {url}")
             return response
 
         except requests.RequestException as e:
-            logger.error(f"Error fetching URL {normalized_url}: {e}")
+            logger.error(f"Error fetching URL {url}: {e}")
             raise
 
     def crawl(self) -> None:
@@ -95,57 +87,77 @@ class Crawler:
             )
 
     def crawl_page(
-        self, url: str, high_priority_keywords: List[str], medium_priority_keywords: List[str], current_depth: int = 0
-    ) -> Optional[Dict]:
+        self,
+        url: str,
+        high_priority_keywords: List[str],
+        medium_priority_keywords: List[str],
+        current_depth: int = 0,
+    ) -> Dict:
         """Crawl a single page and process its links."""
         logger.debug(f"Starting crawl for URL: {url} at depth {current_depth}")
 
-        if not self._is_valid_depth(current_depth) or self._has_reached_page_limit():
-            return None
+        # Early validation of URL format
+        result = urlparse(url)
+        if not all([result.scheme, result.netloc]):
+            logger.error(f"Invalid URL format: {url}")
+            return None  # Return early if the URL is invalid
 
-        response = self._fetch_page(url)
-        if not response:
-            return None
-
+        # Normalize the URL after validating its format
         normalized_url = normalize_url(url)
         if not normalized_url:
             logger.error(f"Normalization failed for URL: {url}")
             return None
+        url = normalized_url  # Use the normalized URL from here on
+
+        # Check if the URL has already been visited
+        if url in self.visited_urls:
+            logger.debug(f"URL already visited: {url}")
+            return None
+
+        # Fetch the page only if the URL is valid and not visited
+        try:
+            response = self._fetch_page(url)
+        except Exception as e:
+            logger.error(f"Failed to fetch page {url} after retries: {e}")
+            return None
+
+        if not response:
+            return None
 
         # Attempt to store the page and retrieve its ID
-        page_id = self.db.store_page(normalized_url)
+        page_id = self.db.store_page(url)
         if not page_id:
-            logger.error(f"Could not store or retrieve page ID for {normalized_url}")
+            logger.error(f"Could not store or retrieve page ID for {url}")
             return None
 
         # Mark the URL as visited only after successfully storing it
-        self.visited_urls.add(normalized_url)
+        self.visited_urls.add(url)
 
         # Parse the HTML content
-        soup = self._parse_html(response, normalized_url)
+        soup = self._parse_html(response, url)
         if not soup:
             return None
 
         # Extract links from the parsed HTML
-        raw_links = extract_links(soup, normalized_url)
+        raw_links = extract_links(soup, url)
         self._log_extracted_links(raw_links)
 
         # Limit the number of links if in test mode
         if self.test_mode:
             raw_links = self._limit_links_for_test_mode(raw_links)
 
-        # Format links for analysis
-        links_with_context = self._format_links(raw_links)
-        logger.debug(f"Formatted links: {links_with_context}")
-
         # Filter out links that have already been analyzed
-        new_links = self._filter_new_links(links_with_context)
+        new_links = self._filter_new_links(raw_links)
         if not new_links:
             logger.info("No new links to analyze.")
-            return None
+            return {"url": url, "num_links": 0, "links": []}
+
+        # Format links for analysis
+        links_with_context = self._format_links(new_links)
+        logger.debug(f"Formatted links: {links_with_context}")
 
         # Analyze the new links using Gemini
-        analyzed_links = self._analyze_links(new_links, high_priority_keywords, medium_priority_keywords)
+        analyzed_links = self._analyze_links(links_with_context, high_priority_keywords, medium_priority_keywords)
         if not analyzed_links:
             logger.info("No links analyzed as relevant.")
             return None
@@ -154,16 +166,16 @@ class Crawler:
             # Store the analyzed links in the database
             formatted_links = self._format_links_for_db(analyzed_links)
             self.db.store_links(formatted_links, page_id)
-            logger.info(f"Stored page {normalized_url} with ID {page_id} and {len(analyzed_links)} links.")
+            logger.info(f"Stored page {url} with ID {page_id} and {len(analyzed_links)} links.")
         except Exception as e:
-            logger.error(f"Error processing links for page {normalized_url}: {e}")
+            logger.error(f"Error processing links for page {url}: {e}")
             return None
 
         # Recursively crawl child links if depth allows
         if current_depth < self.max_depth:
             self._crawl_child_links(analyzed_links, high_priority_keywords, medium_priority_keywords, current_depth)
 
-        return {"url": normalized_url, "num_links": len(analyzed_links), "links": analyzed_links}
+        return {"url": url, "num_links": len(analyzed_links), "links": analyzed_links}
 
     def _is_valid_depth(self, current_depth: int) -> bool:
         """Check if the current depth is within the allowed maximum depth."""
@@ -192,8 +204,9 @@ class Crawler:
     def _log_extracted_links(self, raw_links: List[Dict]) -> None:
         """Log the extracted links for debugging."""
         logger.debug(f"Extracted {len(raw_links)} links from the page.")
-        for link in raw_links:
-            logger.debug(f"Extracted link: {link}")
+        if logger.isEnabledFor(logging.DEBUG):
+            for link in raw_links:
+                logger.debug(f"Extracted link: {link}")
 
     def _limit_links_for_test_mode(self, raw_links: List[Dict]) -> List[Dict]:
         """Limit the number of links processed in test mode."""
@@ -202,8 +215,19 @@ class Crawler:
             return raw_links[: self.max_links]
         return raw_links
 
-    def _format_links(self, raw_links: List[Dict]) -> List[Dict]:
-        """Format raw links for analysis."""
+    def _filter_new_links(self, raw_links: List[Dict]) -> List[Dict]:
+        """Filter out links that have already been analyzed and stored."""
+        new_links = []
+        for link in raw_links:
+            url = link.get("url")
+            if url and not self.db.link_exists(url):
+                new_links.append(link)
+            else:
+                logger.debug(f"Skipping already analyzed link: {url}")
+        return new_links
+
+    def _format_links(self, links: List[Dict]) -> List[Dict]:
+        """Format links for analysis."""
         return [
             {
                 "url": link.get("url"),
@@ -211,26 +235,22 @@ class Crawler:
                 "link_text": link.get("link_text", ""),
                 "context": link.get("context", ""),
             }
-            for link in raw_links
+            for link in links
         ]
 
-    def _filter_new_links(self, links_with_context: List[Dict]) -> List[Dict]:
-        """Filter out links that have already been analyzed and stored."""
-        new_links = []
-        for link in links_with_context:
-            if link["url"] and not self.db.link_exists(link["url"]):
-                new_links.append(link)
-            else:
-                logger.debug(f"Skipping already analyzed link: {link['url']}")
-        return new_links
-
     def _analyze_links(
-        self, new_links: List[Dict], high_priority_keywords: List[str], medium_priority_keywords: List[str]
+        self,
+        links_with_context: List[Dict],
+        high_priority_keywords: List[str],
+        medium_priority_keywords: List[str],
     ) -> List[Dict]:
         """Analyze new links using Gemini API."""
-        logger.info(f"🤖 Analyzing {len(new_links)} new links with Gemini.")
+        logger.info(f"🤖 Analyzing {len(links_with_context)} new links with Gemini.")
         analyzed_links = analyze_page_content(
-            new_links, high_priority_keywords, medium_priority_keywords, test_mode=self.test_mode
+            links_with_context,
+            high_priority_keywords,
+            medium_priority_keywords,
+            test_mode=self.test_mode,
         )
         if analyzed_links:
             logger.info(f"✅ Successfully analyzed {len(analyzed_links)} relevant links.")
@@ -240,36 +260,27 @@ class Crawler:
 
     def _format_links_for_db(self, analyzed_links: List[Dict]) -> List[Dict]:
         """Prepare analyzed links for database insertion."""
+
+        def _clean_keywords(keywords):
+            if isinstance(keywords, str):
+                return [keywords.strip()]
+            elif isinstance(keywords, list):
+                return [str(kw).strip() for kw in keywords if kw]
+            else:
+                return []
+
         formatted = []
         for link in analyzed_links:
-            # Get the keyword lists and ensure they're lists of strings
-            high_priority = link.get("high_priority_keywords", [])
-            medium_priority = link.get("medium_priority_keywords", [])
-
-            if isinstance(high_priority, str):
-                high_priority = [high_priority]
-            if isinstance(medium_priority, str):
-                medium_priority = [medium_priority]
-
-            # Ensure each keyword is a complete word, not individual characters
-            high_priority = [
-                "".join(kw) if isinstance(kw, (list, tuple)) else str(kw).strip() for kw in high_priority if kw
-            ]
-            medium_priority = [
-                "".join(kw) if isinstance(kw, (list, tuple)) else str(kw).strip() for kw in medium_priority if kw
-            ]
-
-            # Convert to comma-separated strings
-            high_priority_str = ", ".join(high_priority)
-            medium_priority_str = ", ".join(medium_priority)
+            high_priority = _clean_keywords(link.get("high_priority_keywords", []))
+            medium_priority = _clean_keywords(link.get("medium_priority_keywords", []))
 
             formatted_link = {
                 "url": link["url"],
                 "title": link.get("title", ""),
                 "relevancy": link.get("relevancy", 0.0),
                 "relevancy_explanation": link.get("relevancy_explanation", ""),
-                "high_priority_keywords": high_priority_str,
-                "medium_priority_keywords": medium_priority_str,
+                "high_priority_keywords": ", ".join(high_priority),
+                "medium_priority_keywords": ", ".join(medium_priority),
                 "context": link.get("context", ""),
             }
 

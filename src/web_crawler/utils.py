@@ -1,45 +1,38 @@
-import json
-from urllib.parse import urlparse
 import functools
+import json
+import logging
 import re
 import time
-from bs4 import BeautifulSoup
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
+
 import requests
-import logging
-from typing import Callable, Any, Dict, List
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
 
-def normalize_url(url: str) -> str:
-    """
-    Normalize URL to ensure www prefix if not present.
-    Returns the normalized URL as a string.
-    """
+from urllib.parse import urlparse, urlunparse
+
+
+def normalize_url(url: str) -> Optional[str]:
     try:
-        # Parse the URL
         parsed = urlparse(url)
-        domain = parsed.netloc
-
-        # Add www if not present
-        if not domain.startswith("www."):
-            domain = "www." + domain
-
-        # Reconstruct URL
-        normalized = f"{parsed.scheme}://{domain}{parsed.path}"
-
-        if parsed.query:
-            normalized += f"?{parsed.query}"
-
-        return normalized
-
+        if not all([parsed.scheme, parsed.netloc]):
+            return None
+        # Additional validation can be added here
+        normalized_netloc = parsed.netloc.lower()
+        if not normalized_netloc.startswith("www."):
+            normalized_netloc = "www." + normalized_netloc
+        normalized_url = urlunparse(
+            (parsed.scheme.lower(), normalized_netloc, parsed.path, parsed.params, parsed.query, parsed.fragment)
+        )
+        return normalized_url
     except Exception as e:
-        logger.error(f"Error normalizing URL {url}: {str(e)}")
-        # Return the original URL as fallback
-        return url
+        logger.error(f"Error normalizing URL {url}: {e}")
+        return None
 
 
-# i would want to unit test this
 def extract_domain(url: str) -> str:
     """Extract the domain from a URL.
 
@@ -73,7 +66,11 @@ def extract_domain(url: str) -> str:
     return ".".join(parts[-2:])
 
 
-def exponential_backoff(max_retries: int = 3, exceptions: tuple = (Exception,), base_delay: float = 1.0) -> Callable:
+def exponential_backoff(
+    max_retries: int = 3,
+    exceptions: Tuple[Exception, ...] = (Exception,),
+    base_delay: float = 1.0,
+) -> Callable:
     """Decorator for exponential backoff retry logic."""
 
     def decorator(func: Callable) -> Callable:
@@ -86,8 +83,9 @@ def exponential_backoff(max_retries: int = 3, exceptions: tuple = (Exception,), 
                     if attempt == max_retries - 1:
                         raise
                     delay = base_delay * (2**attempt)
-                    logger.warning(f"Attempt {attempt + 1} failed: {str(e)}. " f"Retrying in {delay} seconds...")
+                    logger.warning(f"Attempt {attempt + 1} failed: {str(e)}. Retrying in {delay} seconds...")
                     time.sleep(delay)
+            # This line should not be reached
             return None
 
         return wrapper
@@ -95,49 +93,38 @@ def exponential_backoff(max_retries: int = 3, exceptions: tuple = (Exception,), 
     return decorator
 
 
-def parse_url(url: str) -> tuple[str, str]:
+def parse_url(url: str) -> Tuple[str, str]:
     """Parse URL into domain and path."""
-    try:
-        parsed = urlparse(url)
-        domain = parsed.netloc
-        path = parsed.path or "/"
-        return domain, path
-    except Exception as e:
-        logger.error(f"Error parsing URL {url}: {e}")
-        # Return a default value if parsing fails
-        return urlparse(url).netloc, "/"
+    parsed = urlparse(url)
+    domain = parsed.netloc
+    path = parsed.path or "/"
+    return domain, path
 
 
-# further optimization: could add more metadata, like is_external, is_pdf, etc.
-# to classify and improve prioritization
 def extract_links(soup: BeautifulSoup, base_url: str) -> List[Dict]:
     """Extract links from BeautifulSoup object with improved context extraction."""
     links = []
+    block_elements = [
+        "p",
+        "div",
+        "section",
+        "article",
+        "li",
+        "td",
+        "th",
+        "blockquote",
+        "pre",
+        "ul",
+        "ol",
+        "header",
+        "footer",
+        "nav",
+    ]
     for a_tag in soup.find_all("a", href=True):
         href = a_tag["href"]
+        absolute_url = requests.compat.urljoin(base_url, href)
+        link_text = a_tag.get_text(strip=True)
         try:
-            absolute_url = requests.compat.urljoin(base_url, href)
-            link_text = a_tag.get_text(strip=True)
-            context = ""
-
-            # Define block-level elements
-            block_elements = [
-                "p",
-                "div",
-                "section",
-                "article",
-                "li",
-                "td",
-                "th",
-                "blockquote",
-                "pre",
-                "ul",
-                "ol",
-                "header",
-                "footer",
-                "nav",
-            ]
-
             # Find the closest block-level parent
             block_parent = a_tag.find_parent(block_elements)
             if block_parent:
@@ -168,6 +155,7 @@ def extract_links(soup: BeautifulSoup, base_url: str) -> List[Dict]:
             )
 
         except Exception as e:
+            logger.error(f"Error extracting link from {href}: {e}")
             # Even on error, provide minimal context
             links.append(
                 {
@@ -177,13 +165,12 @@ def extract_links(soup: BeautifulSoup, base_url: str) -> List[Dict]:
                     "context": f"Found in {base_url}",
                 }
             )
-            continue
 
     return links
 
 
 def parse_keywords(keywords_str: str) -> List[str]:
-    """Parse comma-separated keywords from cli prompt into a list."""
+    """Parse comma-separated keywords from CLI prompt into a list."""
     if not keywords_str:
         return []
     return [k.strip() for k in keywords_str.split(",") if k.strip()]
@@ -196,7 +183,7 @@ def extract_json(text: str) -> Dict:
         return {"links": []}
 
     # Remove markdown code block markers if present
-    cleaned_text = text.replace("```json", "").replace("```", "").strip()
+    cleaned_text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.MULTILINE).strip()
 
     try:
         return json.loads(cleaned_text)

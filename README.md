@@ -101,7 +101,7 @@ The crawler can be configured with:
 
 5. Parameterization: I added the ability to pass in custom high and medium priority keywords. This allows the crawler to be more flexible and useful for different use cases. Using high and medium priority keywords might not be necessary, I would look to tweak this as part of the prompt engineering
 
-6. Testing - I did not add unit tests. I focused on getting a working prototype and then did manual testing of the individual components. Going forward, I would build a unit test suite and eval testing framework to test the crawler and the llm integration for a production system.
+6. Testing - I added unit tests to experiment at the end. Originally, I focused on getting a working prototype and then did manual testing of the individual components. Going forward, I would build a unit test suite first, and consider my eval testing framework / test set before beginning development (I like to use a modified test-driven development approach)
 
 7. Dynamic content: would need to use a headless browser like Selenium to handle dynamic content.
 
@@ -179,6 +179,11 @@ make crawl ARGS="--high-priority Budget,ACFR --medium-priority Staff,Contact"
 # Run api 
 ```bash
 make run-api  # This command exists in Makefile but isn't documented
+```
+
+# Run tests
+```bash
+make test
 ```
 
 ### Default Keywords
