@@ -65,15 +65,38 @@ The current implementation uses Python's built-in capabilities and SQLite for st
 - Enables filtering high-priority content via the API
 
 ### Areas for Improvement
-1. **True Link Prioritization**:
+1. **Intelligent keyword handling**:
+   - Leverage the LLM to suggest new keywords based on content being crawled or synonyms. Some ideas:
+   ```
+   def generate_synonyms(keyword: str, context: str = "") -> List[str]:
+      prompt = f"Generate a list of synonyms and related terms for the keyword '{keyword}' in the context of {context}."
+      response = gemini_model.generate_content(prompt)
+      synonyms = extract_json(response.text).get('synonyms', [])
+      return synonyms
+      
+   def suggest_keywords(content: str, existing_keywords: List[str]) -> List[str]:
+      prompt = f"Analyze the following content and suggest new relevant keywords related to government financial information, excluding existing keywords {existing_keywords}.\n\nContent:\n{content}"
+      response = gemini_model.generate_content(prompt)
+      suggested_keywords = extract_json(response.text).get('keywords', [])
+      return suggested_keywords
+
+    def categorize_keywords(keywords: List[str]) -> Dict[str, List[str]]:
+      prompt = f"Categorize the following keywords into relevant categories related to government financial information:\n\nKeywords: {', '.join(keywords)}\n\nProvide the categories and associated keywords in JSON format."
+      response = gemini_model.generate_content(prompt)
+      categorized_keywords = extract_json(response.text)
+      return categorized_keywords
+    ```
+
+2. **True Link Prioritization**:
    - Implement a priority queue for crawling
    - Use relevancy scores to determine crawl order
    - Add depth-limiting based on relevancy thresholds
 
-2. **Current Limitations**:
+3. **Current Limitations**:
    - Crawls in HTML document order
    - Relevancy scores only used for filtering results
    - No dynamic path prioritization
+   - No category tags
 
 ## Key Components
 
@@ -95,7 +118,7 @@ The crawler can be configured with:
 
 1. Approach to LLM integration: Originally, I experimented with passing the entire HTML contents of a page to the LLM and allowing the model to extract links and assign relevancy. This was a simple approach, although I had to truncate the length of the html content for testing purposes and so that I could remain in gemini's free tier. I wanted to try using beautiful soup to extract links with a context window around them and passing those links to gemini for analysis. If I were to pursue this project further, I would try generating embeddings for each page and using a vector database to store and query the embeddings.
 
-2. Eval: To improve the prompt further, I would provide a few example html documents and their expected outputs (the links and relevancy scores), so that the model is more likely to return the correct output format.
+2. Eval and context: To improve the prompt further, I would provide a few example html documents and their expected outputs (the links and relevancy scores), so that the model is more likely to return the correct output format.
 3. Prompt engineering: I played around with the prompt to get better results. Developing a test set to compare the results of my prompt to the expected output would help me improve the prompt further.
 4. Web scraping: I noticed a few bugs come up with the urls provided. First, the bozeman url was a redirect, which initially caused the crawler to fail - it required adjusting the headers. Third, the https://boerneisd.net/ was timing out. I noticed that adding a 'www' to the url seemed to fix the issue. In order to deal with that, I added a block of logic in the exponential backoff function that tries to remove or add a www from the url and retry.
 
