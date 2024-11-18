@@ -2,6 +2,8 @@
 
 A Python web crawler project with Gemini LLM link prioritization and sqlite storage.
 
+Codebase walkthru and demo: https://www.loom.com/share/ee7be5da393c484083358897b8ea28e5?sid=796675bd-fa35-443a-8d00-e42a36508c48
+
 ## Core Approach
 
 ### 1. Architectural Evolution & Choices
