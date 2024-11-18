@@ -103,6 +103,8 @@ def parse_url(url: str) -> Tuple[str, str]:
 
 def extract_links(soup: BeautifulSoup, base_url: str) -> List[Dict]:
     """Extract links from BeautifulSoup object with improved context extraction."""
+    logger.debug(f"Starting link extraction from {base_url}")
+
     links = []
     block_elements = [
         "p",
@@ -120,25 +122,111 @@ def extract_links(soup: BeautifulSoup, base_url: str) -> List[Dict]:
         "footer",
         "nav",
     ]
-    for a_tag in soup.find_all("a", href=True):
+
+    # Skip patterns for URLs
+    skip_patterns = [
+        r"^javascript:",  # JavaScript links
+        r"^#",  # Anchor links
+        r"void\(0\)",  # JavaScript void
+        r"^$",  # Empty links
+    ]
+    skip_regex = re.compile("|".join(skip_patterns))
+
+    # Find all anchor tags
+    all_anchors = soup.find_all("a", href=True)
+    # logger.debug(f"Found {len(all_anchors)} anchor tags")
+
+    for a_tag in all_anchors:
         href = a_tag["href"]
+        logger.debug(f"\nProcessing link with href: {href}")
+
+        # Skip unwanted link types
+        if skip_regex.search(href):
+            # logger.debug(f"Skipping link with pattern match: {href}")
+            continue
+
+        # More strict image check
+        if a_tag.find("img"):
+            img = a_tag.find("img")
+            src = img.get("src", "").lower()
+            if "spacer.gif" in src:
+                logger.debug(f"Skipping spacer image link: {a_tag}")
+                continue
+            if href.lower().endswith(".pdf"):
+                logger.debug("Keeping PDF link with image")
+            else:
+                logger.debug(f"Skipping image link: {a_tag}")
+                continue
+
+        # Skip links that are just fragments of the current URL
+        if href.startswith("#sitebody"):
+            logger.debug("Skipping sitebody fragment")
+            continue
+
+        # if href.startswith("mailto:"):
+        #     logger.debug("Found mailto link - preserving for contact information")
+        #     email = href.replace("mailto:", "")
+        #     links.append(
+        #         {
+        #             "url": href,
+        #             "link_text": email,
+        #             "context": f"Contact email address: {email}",
+        #             "is_contact": True,  # Add flag for contact info
+        #         }
+        #     )
+        #     continue
+
+        # if href.startswith("tel:"):
+        #     logger.debug("Found tel link - preserving for contact information")
+        #     phone_number = href.replace("tel:", "")
+        #     links.append(
+        #         {
+        #             "url": href,
+        #             "link_text": phone_number,
+        #             "context": f"Contact phone number: {phone_number}",
+        #             "is_contact": True,  # Add flag for contact info
+        #         }
+        #     )
+        #     continue
+
         absolute_url = requests.compat.urljoin(base_url, href)
+
+        # Skip if the absolute URL matches any skip patterns
+        if skip_regex.search(absolute_url):
+            logger.debug(f"Skipping absolute URL with pattern match: {absolute_url}")
+            continue
+
+        # logger.debug(f"Absolute URL: {absolute_url}")
+
+        # Get link text with detailed logging
         link_text = a_tag.get_text(strip=True)
+        # logger.debug(f"Raw anchor tag: {a_tag}")
+        # logger.debug(f"Extracted link text: {link_text}")
+
+        # Skip empty links
+        if not link_text:
+            logger.debug("Skipping empty link text")
+            continue
+
         try:
             # Find the closest block-level parent
             block_parent = a_tag.find_parent(block_elements)
             if block_parent:
                 context = block_parent.get_text(" ", strip=True)
+                # logger.debug(f"Found block parent: {block_parent.name}")
             else:
-                # If no block-level parent, get surrounding text nodes
+                # logger.debug("No block parent found, getting surrounding text")
                 previous_text = a_tag.find_previous(string=True)
                 next_text = a_tag.find_next(string=True)
                 context = " ".join(filter(None, [previous_text, link_text, next_text]))
+                # logger.debug(f"Previous text: {previous_text}")
+                # logger.debug(f"Next text: {next_text}")
 
             # Fallback: use page title or URL
             if not context.strip():
                 page_title = soup.title.string if soup.title else ""
                 context = f"From page: {page_title or absolute_url}"
+                # logger.debug("Using fallback context")
 
             # Clean up the context
             context = re.sub(r"\s+", " ", context).strip()
@@ -148,23 +236,15 @@ def extract_links(soup: BeautifulSoup, base_url: str) -> List[Dict]:
             links.append(
                 {
                     "url": absolute_url,
-                    "title": a_tag.get("title", ""),
                     "link_text": link_text,
                     "context": context,
                 }
             )
+            logger.debug(f"Successfully added link with text: {link_text}")
 
         except Exception as e:
-            logger.error(f"Error extracting link from {href}: {e}")
-            # Even on error, provide minimal context
-            links.append(
-                {
-                    "url": absolute_url,
-                    "title": "",
-                    "link_text": href,
-                    "context": f"Found in {base_url}",
-                }
-            )
+            logger.error(f"Error processing link {href}: {str(e)}")
+            continue
 
     return links
 
@@ -176,18 +256,23 @@ def parse_keywords(keywords_str: str) -> List[str]:
     return [k.strip() for k in keywords_str.split(",") if k.strip()]
 
 
-def extract_json(text: str) -> Dict:
+def extract_json(text: str) -> List[Dict]:
     """Extract JSON from text, handling markdown code blocks."""
     if not text.strip():
         logger.error("Received empty text to parse")
-        return {"links": []}
+        return []
 
     # Remove markdown code block markers if present
     cleaned_text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.MULTILINE).strip()
 
     try:
-        return json.loads(cleaned_text)
+        parsed_json = json.loads(cleaned_text)
+        if isinstance(parsed_json, list):
+            return parsed_json
+        else:
+            logger.error("Parsed JSON is not a list.")
+            return []
     except json.JSONDecodeError as e:
         logger.error(f"JSON decode error: {str(e)}")
         logger.error(f"Failed text: {cleaned_text}")
-        return {"links": []}
+        return []

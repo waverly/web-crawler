@@ -8,10 +8,16 @@ import argparse
 import sys
 from .crawler import Crawler
 from .database import Database
-from .utils import parse_keywords
+from .utils import normalize_url, parse_keywords
 from . import config
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+# Set the basic configuration to DEBUG level
+logging.basicConfig(
+    level=logging.DEBUG,  # This will show both DEBUG and INFO messages
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+
+# No need to set individual loggers if you want all of them to show DEBUG level
 logger = logging.getLogger(__name__)
 
 
@@ -49,26 +55,29 @@ def main():
         # Initialize crawler - test mode is passed in via CLI but defaults to False
         crawler = Crawler(db, test_mode=args.test)
 
+        # Add debug logging to see the keywords
+        logger.info(f"High priority keywords: {high_priority}")
+        logger.info(f"Medium priority keywords: {medium_priority}")
+
         # Crawl each test URL
         for url in urls:
-            logger.info(f"\nStarting crawl of {url}")
-            try:
-                result = crawler.crawl_page(
-                    url=url, high_priority_keywords=high_priority, medium_priority_keywords=medium_priority
-                )
-
-                if result and "links" in result:
-                    num_links = len(result["links"])
-                    logger.info(f"Successfully processed {url} with {num_links} links")
-                else:
-                    logger.warning(f"No valid results for {url}")
-
-            except KeyboardInterrupt:
-                logger.info("\n🛑 Crawler stopped by user. Saving current progress...")
-                break  # Exit cleanly from the URL loop
-            except Exception as e:
-                logger.error(f"Failed to process {url}: {str(e)}")
+            # Normalize the URL first
+            normalized_url = normalize_url(url)
+            if not normalized_url:
+                logger.error(f"Invalid URL format: {url}")
                 continue
+
+            logger.info(f"\nStarting crawl of {normalized_url}")
+            result = crawler.crawl_page(
+                normalized_url,
+                high_priority_keywords=high_priority,  # Use parsed keywords here
+                medium_priority_keywords=medium_priority,  # Use parsed keywords here
+            )
+
+            if result:
+                logger.info(f"Successfully crawled {normalized_url}")
+            else:
+                logger.warning(f"No valid results for {normalized_url}")
 
     except Exception as e:
         logger.error(f"Crawler encountered a critical error: {str(e)}")
